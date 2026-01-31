@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>金彪基金估算工具 v5.0 - 完整稳定版</title>
+  <title>金彪基金估算工具 v5.1 - 修复版</title>
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; background: #f8f9fa; color: #212529; max-width: 900px; margin: auto; }
     body.dark { background: #121212; color: #e0e0e0; }
@@ -26,21 +26,23 @@
     .status-trading { color: #0d6efd; font-weight: bold; }
     .status-closed { color: #6c757d; font-weight: bold; }
     .delete-btn { color: #dc3545; cursor: pointer; font-weight: bold; }
-    #suggestions { position: absolute; top: 100%; left: 0; width: 100%; max-height: 200px; overflow-y: auto; background: white; border: 1px solid #ced4da; border-radius: 6px; z-index: 100; display: none; }
+    #suggestions { position: absolute; top: 100%; left: 0; width: 100%; max-height: 200px; overflow-y: auto; background: white; border: 1px solid #ced4da; border-radius: 6px; z-index: 100; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
     body.dark #suggestions { background: #1e1e1e; border-color: #444; }
-    .suggestion-item { padding: 10px; cursor: pointer; }
+    .suggestion-item { padding: 10px; cursor: pointer; border-bottom: 1px solid #eee; }
+    body.dark .suggestion-item { border-bottom-color: #333; }
     .suggestion-item:hover { background: #e9ecef; }
     body.dark .suggestion-item:hover { background: #2d2d2d; }
     .time { font-size: 0.85em; color: #6c757d; }
+    .loading { color: #6c757d; text-align: center; padding: 20px; font-style: italic; }
   </style>
 </head>
 <body>
 
-<h1>金彪基金估算工具 v5.0</h1>
+<h1>金彪基金估算工具 v5.1</h1>
 
 <div class="disclaimer">
-  输入基金中文名称/简称/拼音 → 自动弹出匹配建议 → 点击选择自动填充代码 → 点“添加选中”加入列表。<br>
-  支持A股/港股/美股ETF。数据为估算，仅供个人参考，不构成投资建议。<br>
+  输入基金中文名称/简称/拼音 → 自动弹出匹配建议 → 点击选择自动添加。<br>
+  支持A股/港股/美股ETF。数据为估算，仅供参考，不构成投资建议。<br>
   估算刷新30秒一次，时间/状态5秒更新。
 </div>
 
@@ -53,7 +55,9 @@
 </div>
 
 <div class="api-box">
-  <select id="apiSelect" onchange="saveApi()"></select>
+  <select id="apiSelect" onchange="saveApi()">
+    <option>加载接口中...</option>
+  </select>
   <button onclick="refreshAll(true)">强制刷新估算</button>
   <button onclick="toggleDarkMode()">暗模式</button>
 </div>
@@ -71,9 +75,8 @@
 </table>
 
 <script>
-  // ==================== 核心变量 ====================
   let funds = JSON.parse(localStorage.getItem('myFunds')) || [];
-  const CACHE_DURATION = 30000; // 估算缓存30秒
+  const CACHE_DURATION = 30000; // 30秒缓存
   let lastApiRefresh = 0;
   let sortDesc = true;
   let searchTimer = null;
@@ -81,18 +84,38 @@
 
   const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
 
-  // 接口列表（2026年1月有效）
+  // 接口列表（优先新浪快照，稳定跨域）
   let apiList = [
     {
-      name: "天天基金手机版 (A股/港股)",
-      url: "https://fundmobapi.eastmoney.com/FundMApi/FundNetValueEstimate?fc={code}&deviceid=app&version=1.0",
-      parse: d => d?.Datas?.[0] ? {name:d.Datas[0].FSNAME, gzgz:parseFloat(d.Datas[0].GSZZL)||0, gztime:d.Datas[0].GZTIME||'未知'} : null,
+      name: "新浪财经快照 (最稳定备份)",
+      url: "https://hq.sinajs.cn/list=sh{code},sz{code},hk{code}",
+      parse: text => {
+        const lines = text.split(';');
+        for (let line of lines) {
+          if (line.includes('hq_str_')) {
+            const match = line.match(/var hq_str_.*?="(.*?)";/);
+            if (match) {
+              const f = match[1].split(',');
+              return {
+                name: f[0] || '未知',
+                gzgz: parseFloat(f[3]) || 0, // 涨跌幅
+                gztime: new Date().toLocaleString('zh-CN', { hour12: false })
+              };
+            }
+          }
+        }
+        return null;
+      },
       type: 'cn_hk'
     },
     {
       name: "Yahoo Finance 美股ETF",
       url: "https://query1.finance.yahoo.com/v7/finance/quote?symbols={code}",
-      parse: d => d?.quoteResponse?.result?.[0] ? {name:d.quoteResponse.result[0].shortName||'未知', gzgz:parseFloat(d.quoteResponse.result[0].regularMarketChangePercent)||0, gztime:new Date(d.quoteResponse.result[0].regularMarketTime*1000).toLocaleString('zh-CN',{hour12:false})} : null,
+      parse: d => d?.quoteResponse?.result?.[0] ? {
+        name: d.quoteResponse.result[0].shortName || '未知',
+        gzgz: parseFloat(d.quoteResponse.result[0].regularMarketChangePercent) || 0,
+        gztime: new Date(d.quoteResponse.result[0].regularMarketTime * 1000).toLocaleString('zh-CN', { hour12: false })
+      } : null,
       type: 'us'
     }
   ];
@@ -103,7 +126,7 @@
   const input = document.getElementById('fundInput');
   const suggestionsDiv = document.getElementById('suggestions');
 
-  // ==================== 中文搜索建议 ====================
+  // 中文搜索（东方财富建议）
   input.addEventListener('input', () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
@@ -118,7 +141,6 @@
         const url = `http://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx?m=1&key=${encodeURIComponent(kw)}`;
         const proxyUrl = CORS_PROXY + encodeURIComponent(url);
         const res = await fetch(proxyUrl);
-        if (!res.ok) throw new Error('搜索接口状态：' + res.status);
         const data = await res.json();
 
         suggestionsDiv.innerHTML = '';
@@ -153,7 +175,7 @@
     }
   });
 
-  // ==================== 添加选中 ====================
+  // 添加选中
   async function addSelectedFund() {
     let code = input.value.trim().toUpperCase();
     if (selectedFund && selectedFund.code) code = selectedFund.code;
@@ -164,7 +186,7 @@
     }
 
     if (funds.some(f => f.code === code)) {
-      alert('该基金已添加');
+      alert('已添加');
       return;
     }
 
@@ -182,37 +204,42 @@
     }
   }
 
-  // ==================== 估值函数 ====================
+  // 估值函数（新浪快照版，稳定跨域）
   async function fetchFund(code, force = false) {
     const now = Date.now();
     const cache = funds.find(f => f.code === code);
-    if (!force && cache && now - cache.timestamp < CACHE_DURATION) {
-      return cache;
-    }
+    if (!force && cache && now - cache.timestamp < CACHE_DURATION) return cache;
 
-    let attempts = 0;
-    while (attempts < apiList.length) {
-      const api = apiList[currentApiIndex];
-      try {
-        let url = api.url.replace('{code}', code);
-        const proxyUrl = CORS_PROXY + encodeURIComponent(url);
-        const res = await fetch(proxyUrl);
-        if (!res.ok) throw new Error('接口状态：' + res.status);
-        const raw = await res.json();
-        const parsed = api.parse(raw);
-        if (parsed && parsed.gzgz !== undefined) {
-          return { ...parsed, code, timestamp: now, type: api.type };
-        }
-      } catch (e) {
-        console.error('估值失败:', api.name, e);
-        currentApiIndex = (currentApiIndex + 1) % apiList.length;
-      }
-      attempts++;
+    try {
+      let prefix = '';
+      if (/^\d{6}$/.test(code)) prefix = code.startsWith('6') ? 'sh' : 'sz';
+      else if (/^\d{5}$/.test(code)) prefix = 'hk';
+      else prefix = '';
+
+      const url = `https://hq.sinajs.cn/list=${prefix}${code}`;
+      const proxyUrl = CORS_PROXY + encodeURIComponent(url);
+      const res = await fetch(proxyUrl);
+      if (!res.ok) throw new Error('状态：' + res.status);
+      const text = await res.text();
+
+      const match = text.match(/var hq_str_.*?="(.*?)";/);
+      if (!match) throw new Error('无数据');
+
+      const f = match[1].split(',');
+      return {
+        code,
+        name: f[0] || '未知',
+        gzgz: parseFloat(f[3]) || 0,
+        gztime: new Date().toLocaleString('zh-CN', { hour12: false }),
+        timestamp: now
+      };
+    } catch (e) {
+      console.error('估值失败:', e);
+      return null;
     }
-    return null;
   }
 
-  // ==================== 刷新 ====================
+  // 刷新
   async function refreshAll(force = false) {
     if (!funds.length) return;
     const now = Date.now();
@@ -227,7 +254,7 @@
     renderFunds();
   }
 
-  // ==================== 渲染 ====================
+  // 渲染
   function renderFunds() {
     tbody.innerHTML = '';
     if (funds.length === 0) {
@@ -240,7 +267,6 @@
       const cls = ch > 0 ? 'up' : ch < 0 ? 'down' : '';
       const chStr = ch ? ch.toFixed(2) + '%' : '加载中...';
       const timeStr = f.gztime ? `<span class="time">(${f.gztime})</span>` : '';
-      const status = '未知状态'; // 可加回完整状态函数
       tr.innerHTML = `
         <td>${f.code}</td>
         <td>${f.name || f.code}</td>
@@ -259,11 +285,9 @@
     }
   }
 
-  // 占位函数（可扩展）
-  async function updateApiMenu() { console.log('更新接口菜单'); }
-  function saveApi() { console.log('保存接口'); }
-  function testAllApis() { alert('测试所有接口'); }
-  function toggleDarkMode() { document.body.classList.toggle('dark'); }
+  function toggleDarkMode() {
+    document.body.classList.toggle('dark');
+  }
 
   // 初始化
   renderFunds();
